@@ -54,7 +54,7 @@ class TrainConfig:
     cql_lagrange: bool = False  # Use Lagrange version of CQL
     cql_target_action_gap: float = -1.0  # Action gap
     cql_temp: float = 1.0  # CQL temperature
-    cql_alpha: float = 1.0 #10.0  # Minimal Q weight
+    cql_alpha: float = 1e-2 #10.0  # Minimal Q weight
     cql_max_target_backup: bool = False  # Use max target backup
     cql_clip_diff_min: float = -np.inf  # Q-function lower loss clipping
     cql_clip_diff_max: float = np.inf  # Q-function upper loss clipping

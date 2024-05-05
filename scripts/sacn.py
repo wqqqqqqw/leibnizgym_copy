@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import d4rl
+
 import gym
 import numpy as np
 import pyrallis
@@ -18,6 +18,11 @@ import torch.nn as nn
 import wandb
 from torch.distributions import Normal
 from tqdm import trange
+
+from omegaconf import OmegaConf
+import sys
+sys.path.append('/data/user/wanqiang/document/leibnizgym/leibnizgym/utils')
+import rlg_train 
 
 @dataclass
 class TrainConfig:
@@ -36,21 +41,24 @@ class TrainConfig:
     max_action: float = 1.0
     # training params
     buffer_size: int = 1_000_000
-    env_name: str = "halfcheetah-medium-v2"
-    batch_size: int = 256
-    num_epochs: int = 3000
+    env_name: str = "trifinger"
+    batch_size: int = 128 #256
+    num_epochs: int = 50 #3000
     num_updates_on_epoch: int = 1000
     normalize_reward: bool = False
     # evaluation params
-    eval_episodes: int = 10
-    eval_every: int = 5
+    eval_episodes: int = 5  
+    eval_every: int = 10   #5
+    eval_start: int=500
     # general params
-    checkpoints_path: Optional[str] = None
+    checkpoint_save_every: int=4
+    checkpoints_path: Optional[str] = "/data/user/wanqiang/document/leibnizgym/models/sacn_models"
     deterministic_torch: bool = False
     train_seed: int = 10
     eval_seed: int = 42
     log_every: int = 100
-    device: str = "cpu"
+    device: str = "cuda"
+    wandb_log: bool=False
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
@@ -98,9 +106,11 @@ def wrap_env(
     reward_scale: float = 1.0,
 ) -> gym.Env:
     def normalize_state(state):
+        state=state.squeeze().cpu().numpy()
         return (state - state_mean) / state_std
 
     def scale_reward(reward):
+        reward=reward.squeeze().cpu().numpy()
         return reward_scale * reward
 
     env = gym.wrappers.TransformObservation(env, normalize_state)
@@ -115,7 +125,7 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
-        device: str = "cpu",
+        device: str = "cuda",
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
@@ -148,9 +158,9 @@ class ReplayBuffer:
             )
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._dones[:n_transitions] = self._to_tensor(data["terminals"])
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
@@ -307,7 +317,7 @@ class SACN:
         gamma: float = 0.99,
         tau: float = 0.005,
         alpha_learning_rate: float = 1e-4,
-        device: str = "cpu",
+        device: str = "cuda",
     ):
         self.device = device
 
@@ -340,6 +350,7 @@ class SACN:
 
     def _actor_loss(self, state: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
         action, action_log_prob = self.actor(state, need_log_prob=True)
+        print(action[0])
         q_value_dist = self.critic(state, action)
         assert q_value_dist.shape[0] == self.critic.num_critics
         q_value_min = q_value_dist.min(0).values
@@ -449,15 +460,18 @@ class SACN:
 def eval_actor(
     env: gym.Env, actor: Actor, device: str, n_episodes: int, seed: int
 ) -> np.ndarray:
-    env.seed(seed)
+    #env.seed(seed)
     actor.eval()
     episode_rewards = []
-    for _ in range(n_episodes):
+    for _ in trange(n_episodes,desc="evaling"):
         state, done = env.reset(), False
         episode_reward = 0.0
         while not done:
             action = actor.act(state, device)
+            action=torch.tensor(action,dtype=torch.float32,device=device).unsqueeze(0)
             state, reward, done, _ = env.step(action)
+            reward=reward.squeeze().cpu().numpy()
+            done=done.squeeze().cpu().numpy()
             episode_reward += reward
         episode_rewards.append(episode_reward)
 
@@ -489,20 +503,34 @@ def modify_reward(dataset, env_name, max_episode_steps=1000):
         dataset["rewards"] -= 1.0
 
 
-@pyrallis.wrap()
-def train(config: TrainConfig):
+
+def train(hydra_cfg):
+    config=TrainConfig()
+    gym_cfg = OmegaConf.to_container(hydra_cfg.gym)
+    rlg_cfg = OmegaConf.to_container(hydra_cfg.rlg)
+    cli_args= hydra_cfg.args
+    env=rlg_train.create_rlgpu_env2(gym_cfg=gym_cfg,cli_args=cli_args)
+    eval_env = wrap_env(env)
+    state_dim=41
+    action_dim=9
+    dataset=np.load('/data/user/wanqiang/document/leibnizgym/dataset/mydata_v3_418363_notimeout.npy',allow_pickle=True).item()
+    state_dim=41
+    action_dim=9
+
     set_seed(config.train_seed, deterministic_torch=config.deterministic_torch)
-    wandb_init(asdict(config))
+    if config.wandb_log:
+
+        wandb_init(asdict(config))
 
     # data, evaluation, env setup
-    eval_env = wrap_env(gym.make(config.env_name))
-    state_dim = eval_env.observation_space.shape[0]
-    action_dim = eval_env.action_space.shape[0]
+    # eval_env = wrap_env(gym.make(config.env_name))
+    # state_dim = eval_env.observation_space.shape[0]
+    # action_dim = eval_env.action_space.shape[0]
 
-    d4rl_dataset = d4rl.qlearning_dataset(eval_env)
+    # d4rl_dataset = d4rl.qlearning_dataset(eval_env)
 
     if config.normalize_reward:
-        modify_reward(d4rl_dataset, config.env_name)
+        modify_reward(dataset, config.env_name)
 
     buffer = ReplayBuffer(
         state_dim=state_dim,
@@ -510,7 +538,7 @@ def train(config: TrainConfig):
         buffer_size=config.buffer_size,
         device=config.device,
     )
-    buffer.load_d4rl_dataset(d4rl_dataset)
+    buffer.load_d4rl_dataset(dataset)
 
     # Actor & Critic setup
     actor = Actor(state_dim, action_dim, config.hidden_dim, config.max_action)
@@ -538,8 +566,7 @@ def train(config: TrainConfig):
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
-            pyrallis.dump(config, f)
+
 
     total_updates = 0.0
     for epoch in trange(config.num_epochs, desc="Training"):
@@ -549,12 +576,18 @@ def train(config: TrainConfig):
             update_info = trainer.update(batch)
 
             if total_updates % config.log_every == 0:
-                wandb.log({"epoch": epoch, **update_info})
+                if config.wandb_log:
+                    wandb.log({"epoch": epoch, **update_info})
 
             total_updates += 1
-
+        if (epoch+1)%config.checkpoint_save_every==0 or epoch == config.num_epochs - 1:
+            if config.checkpoints_path is not None:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"{epoch}.pt"),
+                )
         # evaluation
-        if epoch % config.eval_every == 0 or epoch == config.num_epochs - 1:
+        if (epoch % config.eval_every == 0 or epoch == config.num_epochs - 1)and epoch>config.eval_start:
             eval_returns = eval_actor(
                 env=eval_env,
                 actor=actor,
@@ -571,16 +604,18 @@ def train(config: TrainConfig):
                 normalized_score = eval_env.get_normalized_score(eval_returns) * 100.0
                 eval_log["eval/normalized_score_mean"] = np.mean(normalized_score)
                 eval_log["eval/normalized_score_std"] = np.std(normalized_score)
-
-            wandb.log(eval_log)
+            
+            
+            if config.wandb_log:
+                wandb.log(eval_log)
 
             if config.checkpoints_path is not None:
                 torch.save(
                     trainer.state_dict(),
                     os.path.join(config.checkpoints_path, f"{epoch}.pt"),
                 )
-
-    wandb.finish()
+    if config.wandb_log:
+        wandb.finish()
 
 
 if __name__ == "__main__":

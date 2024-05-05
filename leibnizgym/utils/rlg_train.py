@@ -29,13 +29,13 @@ import argparse
 import yaml
 from datetime import datetime
 from copy import deepcopy
-from scripts.PPO import *
 from rl_games.algos_torch import model_builder
 #from document.leibnizgym.scripts import ppo_continuous_action_isaacgym
 import sys
 sys.path.append('/data/user/wanqiang/document/leibnizgym/scripts')
 import ppo_tt
 import cql
+import sacn
 
 def parse_vec_task(args: argparse.Namespace, cfg: dict) -> VecTaskPython:
     """Parses the configuration parameters for the environment task.
@@ -250,6 +250,7 @@ def run_rlg_hydra(hydra_cfg):
     else:
         print("start offline")
         cql.train(hydra_cfg=hydra_cfg)
+        #sacn.train(hydra_cfg=hydra_cfg)
 
 
 def run_rlg():
